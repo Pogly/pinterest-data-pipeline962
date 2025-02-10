@@ -1,0 +1,158 @@
+# Databricks notebook source
+# DBTITLE 1,Import Data
+bucket_name = "user-e89446818119-bucket"
+
+df_pin = spark.read.json(f"s3a://{bucket_name}/topics/e89446818119.pin/partition=0/")
+df_geo = spark.read.json(f"s3a://{bucket_name}/topics/e89446818119.geo/partition=0/")
+df_user = spark.read.json(f"s3a://{bucket_name}/topics/e89446818119.user/partition=0/")
+display(df_pin)
+dbutils.fs.ls(f"s3a://{bucket_name}/") # List the contents of the S3 directory
+
+# COMMAND ----------
+
+# DBTITLE 1,Pin Cleaning
+from pyspark.sql.functions import regexp_replace, col
+
+
+df_pinclean = df_pin
+
+df_pinclean = df_pinclean.replace({'': None})
+df_pinclean = df_pinclean.replace({'User Info Error': None}, subset=['poster_name','follower_count'])
+df_pinclean = df_pinclean.replace({'No description available Story format': None}, subset=['description'])
+df_pinclean = df_pinclean.replace({'N,o, ,T,a,g,s, ,A,v,a,i,l,a,b,l,e': None}, subset=['tag_list'])
+
+df_pinclean = df_pinclean.withColumn("follower_count", regexp_replace("follower_count", '[k]', "000"))
+df_pinclean = df_pinclean.withColumn("follower_count", regexp_replace("follower_count", '[M]', "000000"))
+
+df_pinclean = df_pinclean.withColumn("follower_count", df_pinclean["follower_count"].cast("int"))
+df_pinclean = df_pinclean.withColumn("downloaded", df_pinclean["downloaded"].cast("int"))
+df_pinclean = df_pinclean.withColumn("index", df_pinclean["index"].cast("int"))
+
+df_pinclean = df_pinclean.filter(col("follower_count").isNotNull())
+df_pinclean = df_pinclean.filter(col("downloaded").isNotNull())
+df_pinclean = df_pinclean.filter(col("index").isNotNull())
+
+df_pinclean = df_pinclean.withColumn("save_location", regexp_replace("save_location", '^.*?\/', ""))
+
+df_pinclean = df_pinclean.withColumnRenamed("index", "ind")
+
+df_pinclean = df_pinclean.select("ind", "unique_id", "title", "description", "follower_count", "poster_name", "tag_list", "is_image_or_video", "image_src", "save_location", "category")
+
+display(df_pinclean)
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Geo Cleaning
+from pyspark.sql.functions import array
+from pyspark.sql.functions import to_timestamp
+
+df_geoclean = df_geo
+
+df_geoclean = df_geoclean.withColumn("coordinates", array("latitude", "longitude"))
+
+df_geoclean = df_geoclean.drop("latitude", "longitude")
+
+df_geoclean = df_geoclean.withColumn("Timestamp", to_timestamp("Timestamp"))
+
+df_geoclean = df_geoclean.select("ind", "country", "coordinates", "timestamp")
+
+display(df_geoclean)
+
+# COMMAND ----------
+
+# DBTITLE 1,User Cleaning
+from pyspark.sql.functions import array
+from pyspark.sql.functions import to_timestamp
+
+df_userclean = df_user
+
+df_userclean = df_userclean.withColumn("user_name", array("first_name", "last_name"))
+
+df_userclean = df_userclean.drop("first_name", "last_name")
+
+df_userclean = df_userclean.withColumn("date_joined", to_timestamp("date_joined"))
+
+df_userclean = df_userclean.select("ind", "user_name", "age", "date_joined")
+
+display(df_userclean)
+
+# COMMAND ----------
+
+# DBTITLE 0,Join DFs together
+joined_df = df_pinclean.join(df_geoclean, df_pinclean["ind"] == df_geoclean["ind"], how="inner")
+
+joined_df = joined_df.join(df_userclean, df_pinclean["ind"] == df_userclean["ind"], how="inner")
+
+display(joined_df)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Tasks Start
+# MAGIC
+
+# COMMAND ----------
+
+df_count_contry_catagory = joined_df.groupBy("country", "category").agg(count("category").alias("category_count"))
+windowa = Window.partitionBy("country").orderBy(col("category_count").desc())
+df_count_contry_catagory_rank = df_count_contry_catagory.withColumn("rank", dense_rank().over(windowa))
+display(df_count_contry_catagory_rank)
+
+# COMMAND ----------
+
+from pyspark.sql.functions import year
+
+df_year_2018_2022 = joined_df.filter((year("timestamp") >= 2018) & (year("timestamp") <= 2022))
+df_count_year_catagory = df_year_2018_2022.groupBy(year("timestamp").alias("post_year"), "category").agg(count("*").alias("category_count"))
+display(df_count_year_catagory)
+
+# COMMAND ----------
+
+df_max_country_postername = joined_df.groupBy("country","poster_name").agg(max(col("follower_count")).alias("follower_count"))
+
+df_max_country = df_max_country_postername.groupBy("country").agg(max(col("follower_count")).alias("follower_count"))
+
+display(df_max_country)
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+df_Age_Group = joined_df.withColumn("age_group", F.when((col("age") < 24) & (col("age") >= 18), "18-24").otherwise(F.when((col("age") >= 24) & (col("age") < 36), "24-35").otherwise(F.when((col("age") >= 36) & (col("age") <= 50), "36-50").otherwise(F.when((col("age") > 50), "+50")))))
+
+df_count_age_catagory = df_Age_Group.groupBy("age_group", "category").agg(count("category").alias("category_count"))
+windowa = Window.partitionBy("age_group").orderBy(col("category_count").desc())
+df_count_age_catagory_rank = df_count_age_catagory.withColumn("rank", dense_rank().over(windowa))
+
+display(df_count_age_catagory_rank)
+    
+
+# COMMAND ----------
+
+df_meidian_agegroup = df_Age_Group.groupBy("age_group").agg(F.median(col("follower_count")).alias("median_follower_count"))
+
+display(df_meidian_agegroup)
+
+# COMMAND ----------
+
+from pyspark.sql.functions import countDistinct
+df_datejoined = joined_df.filter((year("date_joined") >= 2015) & (year("date_joined") <= 2020))
+
+df_count_age = df_datejoined.groupBy(year("date_joined")).agg(countDistinct("user_name").alias("number_users_joined"))
+
+display(df_count_age)
+
+# COMMAND ----------
+
+df_mean_age = table1.groupBy(year("date_joined")).agg(F.median(col("follower_count")).alias("median_follower_count"))
+
+display(df_mean_age)
+
+
+# COMMAND ----------
+
+df_Age_and_year = df_Age_Group.filter((year("date_joined") >= 2015) & (year("date_joined") <= 2020))
+df_mean_age_year = df_Age_and_year.groupBy(year("date_joined"), "age_group").agg(F.median(col("follower_count")).alias("median_follower_count"))
+
+display(df_mean_age_year)

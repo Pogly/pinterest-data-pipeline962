@@ -1,0 +1,153 @@
+# Databricks notebook source
+# DBTITLE 1,Extract Data
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+import urllib
+
+# Define the path to the Delta table
+delta_table_path = "dbfs:/user/hive/warehouse/authentication_credentials"
+
+# Read the Delta table to a Spark DataFrame
+aws_keys_df = spark.read.format("delta").load(delta_table_path)
+
+# Get the AWS access key and secret key from the spark dataframe
+ACCESS_KEY = aws_keys_df.select('Access key ID').collect()[0]['Access key ID']
+SECRET_KEY = aws_keys_df.select('Secret access key').collect()[0]['Secret access key']
+# Encode the secrete key
+ENCODED_SECRET_KEY = urllib.parse.quote(string=SECRET_KEY, safe="")
+
+df = spark \
+.readStream \
+.format('kinesis') \
+.option('streamName','Kinesis-Prod-Stream') \
+.option('initialPosition','latest') \
+.option('region','us-east-1') \
+.option('awsAccessKey', ACCESS_KEY) \
+.option('awsSecretKey', SECRET_KEY) \
+.load()
+
+# COMMAND ----------
+
+# DBTITLE 1,Setting Struct types
+Pin_Structure = StructType([
+    StructField("index", IntegerType(), True), 
+    StructField("unique_id", StringType(), True), 
+    StructField("title", StringType(), True), 
+    StructField("description", StringType(), True), 
+    StructField("poster_name", StringType(), True), 
+    StructField("follower_count", StringType(), True), 
+    StructField("tag_list", StringType(), True), 
+    StructField("is_image_or_video", StringType(), True), 
+    StructField("image_src", StringType(), True), 
+    StructField("downloaded", StringType(), True), 
+    StructField("save_location", StringType(), True), 
+    StructField("category", StringType(), True)])
+
+geo_Structure = StructType([
+    StructField("ind", IntegerType(), True), 
+    StructField("timestamp", StringType(), True), 
+    StructField("latitude", StringType(), True), 
+    StructField("longitude", StringType(), True), 
+    StructField("country", StringType(), True)])
+
+user_Structure = StructType([
+    StructField("ind", IntegerType(), True), 
+    StructField("first_name", StringType(), True), 
+    StructField("last_name", StringType(), True), 
+    StructField("age", IntegerType(), True), 
+    StructField("date_joined", StringType(), True)])
+
+
+# COMMAND ----------
+
+from pyspark.sql.functions import regexp_replace, col
+
+
+df_pin = df.filter(df.partitionKey == "pin-Data")
+df_pin = df_pin.selectExpr("CAST(data as STRING) jsonData")
+df_pin = df_pin.select(from_json("jsonData", Pin_Structure).alias("data")).select("data.*")
+
+df_pinclean = df_pin.replace({'': None})
+df_pinclean = df_pinclean.replace({'User Info Error': None}, subset=['poster_name','follower_count'])
+df_pinclean = df_pinclean.replace({'No description available Story format': None}, subset=['description'])
+df_pinclean = df_pinclean.replace({'N,o, ,T,a,g,s, ,A,v,a,i,l,a,b,l,e': None}, subset=['tag_list'])
+
+df_pinclean = df_pinclean.withColumn("follower_count", regexp_replace("follower_count", '[k]', "000"))
+df_pinclean = df_pinclean.withColumn("follower_count", regexp_replace("follower_count", '[M]', "000000"))
+
+df_pinclean = df_pinclean.withColumn("follower_count", df_pinclean["follower_count"].cast("int"))
+df_pinclean = df_pinclean.withColumn("downloaded", df_pinclean["downloaded"].cast("int"))
+df_pinclean = df_pinclean.withColumn("index", df_pinclean["index"].cast("int"))
+
+df_pinclean = df_pinclean.filter(col("follower_count").isNotNull())
+df_pinclean = df_pinclean.filter(col("downloaded").isNotNull())
+df_pinclean = df_pinclean.filter(col("index").isNotNull())
+
+df_pinclean = df_pinclean.withColumn("save_location", regexp_replace("save_location", '^.*?\/', ""))
+
+df_pinclean = df_pinclean.withColumnRenamed("index", "ind")
+
+df_pinclean = df_pinclean.select("ind", "unique_id", "title", "description", "follower_count", "poster_name", "tag_list", "is_image_or_video", "image_src", "save_location", "category")
+
+display(df_pinclean)
+
+dbutils.fs.rm("/tmp/kinesis/_checkpoints/", True)
+
+df.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", "/tmp/kinesis/_checkpoints/") \
+  .table("e89446818119_pin_table")
+
+# COMMAND ----------
+
+# DBTITLE 1,Geo Cleaning
+from pyspark.sql.functions import array
+from pyspark.sql.functions import to_timestamp
+
+df_geo = df.filter(df.partitionKey == "geo-Data")
+df_geo = df_geo.selectExpr("CAST(data as STRING) jsonData")
+df_geo = df_geo.select(from_json("jsonData", geo_Structure).alias("data")).select("data.*")
+
+df_geoclean = df_geo.withColumn("coordinates", array("latitude", "longitude"))
+df_geoclean = df_geoclean.drop("latitude", "longitude")
+df_geoclean = df_geoclean.withColumn("Timestamp", to_timestamp("Timestamp"))
+df_geoclean = df_geoclean.select("ind", "country", "coordinates", "timestamp")
+
+display(df_geoclean)
+
+dbutils.fs.rm("/tmp/kinesis/_checkpoints/", True)
+
+df.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", "/tmp/kinesis/_checkpoints/") \
+  .table("e89446818119_geo_table")
+
+# COMMAND ----------
+
+# DBTITLE 1,User Cleaning
+from pyspark.sql.functions import array
+from pyspark.sql.functions import to_timestamp
+
+df_user = df.filter(df.partitionKey == "user-Data")
+df_user = df_user.selectExpr("CAST(data as STRING) jsonData")
+df_user = df_user.select(from_json("jsonData", user_Structure).alias("data")).select("data.*")
+
+df_userclean = df_user.withColumn("user_name", array("first_name", "last_name"))
+
+df_userclean = df_userclean.drop("first_name", "last_name")
+
+df_userclean = df_userclean.withColumn("date_joined", to_timestamp("date_joined"))
+
+df_userclean = df_userclean.select("ind", "user_name", "age", "date_joined")
+
+display(df_userclean)
+
+dbutils.fs.rm("/tmp/kinesis/_checkpoints/", True)
+
+df.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", "/tmp/kinesis/_checkpoints/") \
+  .table("e89446818119_user_table")
