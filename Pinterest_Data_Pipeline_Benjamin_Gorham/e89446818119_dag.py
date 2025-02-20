@@ -2,9 +2,14 @@ from airflow import DAG
 from airflow.providers.databricks.operators.databricks import DatabricksSubmitRunOperator, DatabricksRunNowOperator
 from datetime import datetime, timedelta 
 
+import yaml
+
+# NOTE would add filepath the a configuration file.
+with open("dagFilepath.Yaml") as Endpoint:
+    invoke_url = yaml.safe_load(Endpoint)
 
 notebook_task = {
-    'notebook_path': '/Workspace/Users/benjamin.gorham@gmail.com/Ben1',
+    'notebook_path': Endpoint,
 }
 
 notebook_params = {

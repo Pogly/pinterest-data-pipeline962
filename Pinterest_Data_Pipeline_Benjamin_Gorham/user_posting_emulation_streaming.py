@@ -1,11 +1,13 @@
-import requests
-from time import sleep
-import random
+from AWSDBConnector import AWSDBConnector
 from multiprocessing import Process
+from sqlalchemy import text
+from time import sleep
+
 import boto3
 import json
+import requests
+import random
 import sqlalchemy
-from sqlalchemy import text
 import yaml
 
 random.seed(100)
@@ -24,21 +26,6 @@ def send_To_stream(payload):
 
     headers = {'Content-Type': 'application/json'}
     response = requests.request("PUT",f"{invoke_url}", headers=headers, data=payload)
-
-class AWSDBConnector:
-
-    def __init__(self):
-
-        self.HOST = "pinterestdbreadonly.cq2e8zno855e.eu-west-1.rds.amazonaws.com"
-        self.USER = 'project_user'
-        self.PASSWORD = ':t%;yCY3Yjg'
-        self.DATABASE = 'pinterest_data'
-        self.PORT = 3306
-        
-    def create_db_connector(self):
-        engine = sqlalchemy.create_engine(f"mysql+pymysql://{self.USER}:{self.PASSWORD}@{self.HOST}:{self.PORT}/{self.DATABASE}?charset=utf8mb4")
-        return engine
-
 
 new_connector = AWSDBConnector()
 
